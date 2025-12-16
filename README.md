@@ -99,4 +99,3 @@ This change was introduced as a **stability fix**, not a conceptual redesign.
 
 This project follows the original **CC0 (Public Domain)** license.
 
-You are free to use, modify, and redistribute it.
