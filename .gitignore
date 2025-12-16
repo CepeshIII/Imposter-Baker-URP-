@@ -1,0 +1,19 @@
+# Ignore everything
+*
+
+# Allow folders (IMPORTANT)
+!*/
+
+# Allow C# scripts
+!**/*.cs
+
+# Allow shaders
+!**/*.shader
+!**/*.shadergraph
+!**/*.hlsl
+
+# Allow Unity meta files
+!**/*.meta
+
+# Allow README
+!README.md
