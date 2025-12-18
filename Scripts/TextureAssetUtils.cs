@@ -14,7 +14,7 @@ namespace ImposterBaker.Editor
             string directoryPath,
             string name)
         {
-            Texture2D tex = rt.ToTexture2D();
+            Texture2D tex = rt.ToTexture2D(true, true);
             tex.name = name;
             return WriteTexture(tex, directoryPath);
         }

@@ -1,13 +1,15 @@
+﻿using ImposterBaker.Data;
 using ImposterBaker.Editor.Assets;
 using ImposterBaker.Geometry;
 using ImposterBaker.Math;
-using ImposterBaker.Data;
+using ImposterBaker.Rendering;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering;
+using static Unity.Burst.Intrinsics.X86.Avx;
 
 
 namespace ImposterBaker.Data
@@ -90,7 +92,13 @@ namespace ImposterBaker.Editor
         [SerializeField] private Material[][] _materials;
         [SerializeField] private Snapshot[] _snapshots;
         [SerializeField] private Bounds _bounds;
-    
+
+        [Header("Test")]
+        [SerializeField] private Vector3 _from;
+        [SerializeField] private Vector3 _to;
+        [SerializeField] private Vector3 _UP;
+
+
         private Camera _camera;
         private MinMaxBakeData _minMaxBakeData;
         private RenderActualTilesData _renderActualTilesData;
@@ -122,7 +130,7 @@ namespace ImposterBaker.Editor
             List<MeshRenderer> renderers = new List<MeshRenderer>(transform.GetComponentsInChildren<MeshRenderer>(true));
             renderers.Remove(gameObject.GetComponent<MeshRenderer>());
 
-            if (_renderers == null || _renderers.Length == 0)
+            if (renderers == null || renderers.Count == 0)
             {
                 Debug.LogError("Imposter Baker: No MeshRenderers found to bake imposter from.");
                 return false;
@@ -174,15 +182,6 @@ namespace ImposterBaker.Editor
         [ContextMenu("Bake")]
         void Bake()
         {
-            var settings = new ImposterBakeSettings
-            {
-                atlasResolution = _atlasResolution,
-                boundsOffset = _boundsOffset,
-                boundsRadius = _boundsRadius,
-                frames = _frames,
-                useHalfSphere = _useHalfSphere,
-            };
-
             string assetPath = EditorUtility.SaveFilePanelInProject("Save Imposter Textures", 
                 gameObject.name, "", "Select textures save location");
             _directoryPath = Path.GetDirectoryName(assetPath);
@@ -208,10 +207,21 @@ namespace ImposterBaker.Editor
                     albedoPackRT = RenderTexture.GetTemporary(_atlasResolution, _atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
                     normalPackRT = RenderTexture.GetTemporary(_atlasResolution, _atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
                     CaptureViews(albedoPackRT, normalPackRT);
+
+                    var settings = new ImposterBakeSettings
+                    {
+                        atlasResolution = _atlasResolution,
+                        boundsOffset = _boundsOffset,
+                        boundsRadius = _boundsRadius,
+                        frames = _frames,
+                        useHalfSphere = _useHalfSphere,
+                    };
+
                     ImposterAssetFactory.Create(gameObject, _directoryPath, albedoPackRT, normalPackRT, settings);
                 } catch (Exception e)
                 {
-                    Debug.LogError($"Imposter Bake Failed: {e}");
+                    Debug.LogError($"Imposter Bake Failed");
+                    Debug.LogException(e);
                 }
     
                 finally
@@ -256,8 +266,21 @@ namespace ImposterBaker.Editor
                 }
             }
         }
-    
-    
+
+
+        void DrawMeshesToTarget(ImposterBakerPass pass, CommandBuffer cmd)
+        {
+            for (int i = 0; i < _renderers.Length; i++)
+            {
+                for (int j = 0; j < _meshes[i].subMeshCount; j++)
+                {
+                    _imposterBakerMaterial.SetPass((int)pass);
+                    cmd.DrawMesh(_meshes[i], _renderers[i].localToWorldMatrix, _imposterBakerMaterial, j);
+                }
+            }
+        }
+
+
         void DrawMeshesToTarget(UnityShaderPass pass)
         {
             for (int i = 0; i < _renderers.Length; i++)
@@ -277,65 +300,99 @@ namespace ImposterBaker.Editor
                 }
             }
         }
-    
-        
-        private void OnEndCameraRendering_MinMaxBake(ScriptableRenderContext context, Camera camera)
-        {
-            if (camera != _camera) return;
 
-            GL.PushMatrix();
-            _minMaxBakeData.texture.Create();
-    
-            Graphics.SetRenderTarget(_minMaxBakeData.texture);
-            GL.Clear(true, true, Color.clear);
-    
-            Matrix4x4 ortho = Matrix4x4.Ortho(-_boundsRadius, _boundsRadius, -_boundsRadius, _boundsRadius, -_boundsRadius * 2, _boundsRadius * 2);
-            GL.LoadProjectionMatrix(ortho);
-    
-            Matrix4x4 cameraMatrix = Matrix4x4.Inverse(
-                Matrix4x4.TRS(_minMaxBakeData.snapshot.position,
-                Quaternion.LookRotation(_minMaxBakeData.snapshot.direction, Vector3.up),
-                new Vector3(1, 1, 1)));
-    
-            DrawMeshesToTarget(ImposterBakerPass.MinMax);
-            GL.PopMatrix();
-        }
-    
-    
-        private void OnEndCameraRendering_RenderActualTiles(ScriptableRenderContext context, Camera camera)
+
+        void DrawMeshesToTarget(UnityShaderPass pass, CommandBuffer cmd)
         {
-            if (camera != _camera) return;
-            GL.PushMatrix();
-    
-            Snapshot currentSnapshot = _renderActualTilesData.snapshot;
-    
-            for (int i = 0; i < _renderActualTilesData.gBuffer.Length; i++)
-                _renderActualTilesData.gBuffer[i].Create();
-    
-            RenderBuffer[] buffers = new RenderBuffer[5];
-            for (int i = 0; i < _renderActualTilesData.gBuffer.Length; i++)
-                buffers[i] = _renderActualTilesData.gBuffer[i].colorBuffer;
-    
-            // render gBuffers
-            Graphics.SetRenderTarget(buffers, _renderActualTilesData.gBuffer[0].depthBuffer);
-            GL.Clear(true, true, Color.clear);
-    
-            // setup camera pos to currentSnapshot
-            Matrix4x4 ortho = Matrix4x4.Ortho(-_boundsRadius, _boundsRadius, -_boundsRadius, _boundsRadius, 0, _boundsRadius * 2);
-            GL.LoadProjectionMatrix(ortho);
-    
-            //Matrix4x4 cameraMatrix = Matrix4x4.TRS(currentSnapshot.position,
-            //    Quaternion.LookRotation(currentSnapshot.direction, Vector3.up),
-            //    Vector3.one).inverse;
-            //GL.modelview = cameraMatrix;
-            camera.transform.position = currentSnapshot.position;
-            camera.transform.rotation = Quaternion.LookRotation(currentSnapshot.direction, Vector3.up);
-    
-            DrawMeshesToTarget(UnityShaderPass.GBuffer);
-            GL.PopMatrix();
+            for (int i = 0; i < _renderers.Length; i++)
+            {
+                Mesh mesh = _meshes[i];
+                Renderer renderer = _renderers[i];
+                Material[] mats = _materials[i];
+
+                for (int s = 0; s < mesh.subMeshCount; s++)
+                {
+                    Material mat = mats[s];
+                    int passIndex = mat.FindPass(Enum.GetName(typeof(UnityShaderPass), pass));
+
+                    if (pass < 0)
+                        continue;
+
+                    mat.SetPass(passIndex);
+                    cmd.DrawMesh(mesh, renderer.localToWorldMatrix, mat, s, passIndex);
+                }
+            }
         }
-    
-    
+
+
+        private void MinMaxBake(CommandBuffer cmd)
+        {
+            cmd.SetViewport(new Rect(
+                0, 0,
+                _minMaxBakeData.texture.width,
+                _minMaxBakeData.texture.height
+            ));
+
+
+            _minMaxBakeData.texture.Create();
+
+            cmd.SetRenderTarget(_minMaxBakeData.texture);
+            cmd.ClearRenderTarget(true, true, Color.clear);
+            
+            Matrix4x4 ortho = Matrix4x4.Ortho(-_boundsRadius, _boundsRadius,
+                -_boundsRadius, _boundsRadius, 0, _boundsRadius * 2);
+            cmd.SetProjectionMatrix(ortho);
+
+            Matrix4x4 cameraMatrix = Matrix4x4.TRS(_minMaxBakeData.snapshot.position, Quaternion.LookRotation(_minMaxBakeData.snapshot.direction, Vector3.up), Vector3.one).inverse;
+            cmd.SetViewMatrix(cameraMatrix);
+
+            DrawMeshesToTarget(ImposterBakerPass.MinMax, cmd);
+        }
+
+
+        private void RenderActualTiles(CommandBuffer cmd)
+        {
+            Snapshot snapshot = _renderActualTilesData.snapshot;
+            RenderTexture[] gBuffer = _renderActualTilesData.gBuffer;
+
+            int w = gBuffer[0].width;
+            int h = gBuffer[0].height;
+
+            for (int i = 0; i < gBuffer.Length; i++)
+                gBuffer[i].Create();
+
+            cmd.SetViewport(new Rect(0, 0, w, h));
+
+            RenderTargetIdentifier[] mrt = new RenderTargetIdentifier[gBuffer.Length];
+            for (int i = 0; i < gBuffer.Length; i++)
+                mrt[i] = new RenderTargetIdentifier(gBuffer[i]);
+
+            cmd.SetRenderTarget(mrt, gBuffer[0].depthBuffer);
+            cmd.ClearRenderTarget(true, true, Color.clear);
+
+            float near = 0;
+            float far = _boundsRadius * 2.0f;
+
+            Matrix4x4 ortho = Matrix4x4.Ortho(
+                -_boundsRadius, _boundsRadius,
+                -_boundsRadius, _boundsRadius,
+                near, far
+            );
+
+            var viewMatrix =
+                Matrix4x4.TRS(snapshot.position, 
+                Quaternion.LookRotation(snapshot.direction), 
+                new Vector3(1, 1, -1)).inverse;
+
+            cmd.SetViewMatrix(viewMatrix);
+            cmd.SetProjectionMatrix(ortho);
+
+            DrawMeshesToTarget(UnityShaderPass.GBuffer, cmd);
+
+            cmd.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.identity);
+        }
+
+
         void CaptureViews(RenderTexture albedoPackRT, RenderTexture normalPackRT)
         {
             int frameResolution = _atlasResolution / _frames;
@@ -359,23 +416,13 @@ namespace ImposterBaker.Editor
                     resolution = _atlasResolution,
                 };
 
-                try
-                {
-                    RenderPipelineManager.endCameraRendering += OnEndCameraRendering_MinMaxBake;
-                    _camera.Render();
-                }
-                finally
-                {
-                    RenderPipelineManager.endCameraRendering -= OnEndCameraRendering_MinMaxBake;
-                }
+                var cmd = new CommandBuffer();
+                MinMaxBake(cmd);
+                Graphics.ExecuteCommandBuffer(cmd);
             }
 
             //now read render texture
-            Texture2D tempMinMaxTex = new Texture2D(_atlasResolution, _atlasResolution, TextureFormat.R8, false);
-            RenderTexture.active = minMaxTileRT;
-            tempMinMaxTex.ReadPixels(new Rect(0f, 0f, _atlasResolution, _atlasResolution), 0, 0);
-            tempMinMaxTex.Apply();
-            TextureAssetUtils.SaveRenderTexture(_minMaxBakeData.texture, _directoryPath, "minMaxTileRT");
+            Texture2D tempMinMaxTex = minMaxTileRT.ToTexture2D();
 
             Color32[] tempTexC = tempMinMaxTex.GetPixels32();
 
@@ -407,12 +454,12 @@ namespace ImposterBaker.Editor
 
             float ratio = maxR / _atlasResolution; //assume square
 
-            _boundsRadius = _boundsRadius * ratio * 1.1f;
+            _boundsRadius = _boundsRadius * ratio;
 
             //recalculate snapshots
-            _snapshots = SnapshotBuilder.Build(_frames, _boundsRadius, _boundsOffset, Quaternion.Euler(_samplingRotation), _useHalfSphere);
+            _snapshots = SnapshotBuilder.Build(_frames, _boundsRadius, _boundsOffset, 
+                Quaternion.Euler(_samplingRotation), _useHalfSphere);
 
-            //minMaxTileRT.Release();
             RenderTexture.ReleaseTemporary(minMaxTileRT);
         }
 
@@ -422,7 +469,7 @@ namespace ImposterBaker.Editor
             Shader.EnableKeyword("_RENDER_PASS_ENABLED");
             for (int frameIndex = 0; frameIndex < _snapshots.Length; frameIndex++)
             {
-                // current snap
+                // current snapshot
                 Snapshot currentSnapshot = _snapshots[frameIndex];
 
                 // set buffers
@@ -444,15 +491,9 @@ namespace ImposterBaker.Editor
                     gBuffer = gBuffer,
                 };
 
-                //OnEndCameraRendering_RenderActualTiles(new ScriptableRenderContext(), null);
-                try
-                {
-                    RenderPipelineManager.endCameraRendering += OnEndCameraRendering_RenderActualTiles;
-                    _camera.Render();
-                }finally
-                {
-                    RenderPipelineManager.endCameraRendering -= OnEndCameraRendering_RenderActualTiles;
-                }
+                var cmd = new CommandBuffer();
+                RenderActualTiles(cmd);
+                Graphics.ExecuteCommandBuffer(cmd);
 
                 // get frame rts
                 RenderTexture depthFrameRT = RenderTexture.GetTemporary(frameResolution, frameResolution, 32, 
@@ -478,6 +519,7 @@ namespace ImposterBaker.Editor
                 PrepareDepth(gBuffer[4], depthFrameRT);
 
                 MergeAlbedoAlpha(gBuffer[0], gBuffer[3], albedoFrameRT);
+
                 MergeNormalsDepthWithDilatePasses(frameResolution, gBuffer[2], depthFrameRT, dilateFrameRT, normalFrameRT);
 
                 BlitToPackRts(frameIndex, albedoFrameRT, normalFrameRT, albedoPackRT, normalPackRT);
@@ -512,7 +554,6 @@ namespace ImposterBaker.Editor
             _imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 0, 0, 0));
             _imposterBakerMaterial.SetPass((int)ImposterBakerPass.DepthCopy);
             Graphics.Blit(depthRT, depthFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.DepthCopy);
-    
         }
     
     

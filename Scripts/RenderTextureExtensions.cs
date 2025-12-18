@@ -44,10 +44,10 @@ namespace ImposterBaker.Rendering
         }
     
 
-        public static Texture2D ToTexture2D(this RenderTexture renderTexture)
+        public static Texture2D ToTexture2D(this RenderTexture renderTexture, bool mipChain = false, bool linear = false)
         {
             TextureFormat format = renderTexture.format.ToTextureFormat();
-            Texture2D texture2D = new Texture2D(renderTexture.width, renderTexture.height, format, true, true);
+            Texture2D texture2D = new Texture2D(renderTexture.width, renderTexture.height, format, mipChain, linear);
 
             Graphics.SetRenderTarget(renderTexture);
             texture2D.ReadPixels(new Rect(0f, 0f, renderTexture.width, renderTexture.height), 0, 0);
