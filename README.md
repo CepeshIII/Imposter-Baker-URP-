@@ -37,10 +37,9 @@ This repository builds on that base and reorganizes parts of the implementation.
 
 ---
 
-### Rendering Approach (Camera Usage)
-
-- This version uses a hidden orthographic **Camera** to drive rendering.
-- Rendering work is performed through `RenderPipelineManager.endCameraRendering`.
+### Rendering Approach (Command Buffers)
+- Rendering is now driven explicitly via Graphics.ExecuteCommandBuffer
+- The baker builds and executes its own command buffers for each bake step
 
 **Reason:**
 
@@ -50,9 +49,11 @@ When relying only on `GL` and `Graphics` calls (as in the original implementatio
 - Subsequent bake calls (without restarting the editor) produced incorrect or corrupted output
 - Re-adding the baker component or restarting the editor restored correct behavior
 
-Using an explicit camera helps ensure that:
-- View and projection state is reset between bake calls
-- URP render state remains consistent across multiple bakes
+Switching to explicit command buffer execution ensures that:
+- Render state is fully controlled by the baker
+- View/projection matrices are applied deterministically
+- Each bake is isolated from editor and scene view render state
+
 
 This change was introduced as a **stability fix**, not a conceptual redesign.
 
