@@ -9,7 +9,6 @@ using System.IO;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Rendering;
-using static Unity.Burst.Intrinsics.X86.Avx;
 
 
 namespace ImposterBaker.Data
@@ -92,12 +91,6 @@ namespace ImposterBaker.Editor
         [SerializeField] private Material[][] _materials;
         [SerializeField] private Snapshot[] _snapshots;
         [SerializeField] private Bounds _bounds;
-
-        [Header("Test")]
-        [SerializeField] private Vector3 _from;
-        [SerializeField] private Vector3 _to;
-        [SerializeField] private Vector3 _UP;
-
 
         private Camera _camera;
         private MinMaxBakeData _minMaxBakeData;
@@ -333,17 +326,23 @@ namespace ImposterBaker.Editor
                 _minMaxBakeData.texture.height
             ));
 
-
             _minMaxBakeData.texture.Create();
 
             cmd.SetRenderTarget(_minMaxBakeData.texture);
-            cmd.ClearRenderTarget(true, true, Color.clear);
-            
-            Matrix4x4 ortho = Matrix4x4.Ortho(-_boundsRadius, _boundsRadius,
-                -_boundsRadius, _boundsRadius, 0, _boundsRadius * 2);
+
+            float near = -_boundsRadius * 2.0f;
+            float far = _boundsRadius * 2.0f;
+            Matrix4x4 ortho = Matrix4x4.Ortho(
+                -_boundsRadius, _boundsRadius,
+                -_boundsRadius, _boundsRadius,
+                near,
+                far);
             cmd.SetProjectionMatrix(ortho);
 
-            Matrix4x4 cameraMatrix = Matrix4x4.TRS(_minMaxBakeData.snapshot.position, Quaternion.LookRotation(_minMaxBakeData.snapshot.direction, Vector3.up), Vector3.one).inverse;
+            Matrix4x4 cameraMatrix = 
+                Matrix4x4.TRS(_minMaxBakeData.snapshot.position, 
+                Quaternion.LookRotation(_minMaxBakeData.snapshot.direction, Vector3.up), 
+                new Vector3(1, 1, -1)).inverse;
             cmd.SetViewMatrix(cameraMatrix);
 
             DrawMeshesToTarget(ImposterBakerPass.MinMax, cmd);
