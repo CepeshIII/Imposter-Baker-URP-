@@ -13,8 +13,8 @@ namespace ImposterBaker.Geometry
 
     public static class SnapshotBuilder
     {
-        public static Snapshot[] Build(int frames, float radius, 
-            Vector3 origin, Quaternion samplingUpRotation,  bool isHalf = true)
+        public static Snapshot[] Build(int frames, float radius,
+            Vector3 origin, Quaternion samplingUpRotation, bool isHalf = true)
         {
             Snapshot[] snapshots = new Snapshot[frames * frames];
 

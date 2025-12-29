@@ -11,15 +11,39 @@ using UnityEngine;
 using UnityEngine.Rendering;
 
 
+
 namespace ImposterBaker.Data
 {
-    public struct ImposterBakeSettings
+    [Serializable]
+    public class ImposterBakeSettings
     {
-        public int atlasResolution;
-        public bool useHalfSphere;
-        public int frames;
+        public int frames = 12;
+        [Range(0, 256)]
+        public int framePadding = 0;
+        public int atlasResolution = 2048;
+        public bool useHalfSphere  = true;
+        [Tooltip(
+            "Rotates the sampling directions used for octahedral capture.\n" +
+            "Does not rotate the object itself.\n" +
+            "Use this to bias detail toward a preferred axis (e.g. trees, towers)."
+        )]
+        public Vector3 samplingRotation;
+        public string directoryPath;
+    }
+
+    [Serializable]
+    public class ImposterBakeData
+    {
         public Vector3 boundsOffset;
         public float boundsRadius;
+        public Shader imposterBakerShader;
+        public Material imposterBakerMaterial;
+
+        public UnityEngine.Renderer[] renderers;
+        public Mesh[] meshes;
+        public Material[][] materials;
+        public Snapshot[] snapshots;
+
     }
 }
 
@@ -53,120 +77,92 @@ namespace ImposterBaker.Editor
             Meta,
         }
 
-        private class MinMaxBakeData
-        {
-            public Snapshot snapshot;
-            public RenderTexture texture;
-            public int resolution;
-        }
 
-        private class RenderActualTilesData
-        {
-            public Snapshot snapshot;
-            public RenderTexture[] gBuffer;
-        }
+        [SerializeField] private ImposterBakeSettings settings;
+        [SerializeField] private ImposterBakeData data;
 
-        [Header("Settings")]
-        [SerializeField] private int _atlasResolution = 2048;
-        [SerializeField] private bool _useHalfSphere = true;
-        [SerializeField] private int _frames = 12;
-        [Range(0, 256)] private float _framePadding = 0;
-        [Header("Baked")]
-        [SerializeField]private Vector3 _boundsOffset;
-        [SerializeField] private float _boundsRadius;
-        [Tooltip(
-        "Rotates the sampling directions used for octahedral capture.\n" +
-        "Does not rotate the object itself.\n" +
-        "Use this to bias detail toward a preferred axis (e.g. trees, towers)."
-        )]
-        [SerializeField] private Vector3 _samplingRotation;
-    
-        [Header("System")]
-        // _materials + shaders
-        [SerializeField] private Shader _imposterBakerShader;
-        [SerializeField] private Material _imposterBakerMaterial;
-        // rendering data
-        [SerializeField] private UnityEngine.Renderer[] _renderers;
-        [SerializeField] private Mesh[] _meshes;
-        [SerializeField] private Material[][] _materials;
-        [SerializeField] private Snapshot[] _snapshots;
-        [SerializeField] private Bounds _bounds;
+        private const int MIN_MAX_TEXTURE_RES = 512;
 
-        private Camera _camera;
-        private MinMaxBakeData _minMaxBakeData;
-        private RenderActualTilesData _renderActualTilesData;
-        private string _directoryPath;
-    
-    
-        bool CheckData()
+
+        bool TryPrepareData(ImposterBakeSettings settings, out ImposterBakeData data)
         {
-            if(_directoryPath == null)
+            data = new();
+
+            if (settings.directoryPath == null)
             {
                 Debug.LogError("Imposter Baker: No directory path set for saving imposter assets.");
                 return false;
             }
 
-            _imposterBakerShader = Shader.Find("IMP/ImposterBaker");
-            if (_imposterBakerShader == null)
+            data.imposterBakerShader = Shader.Find("IMP/ImposterBaker");
+            if (data.imposterBakerShader == null)
             {
                 Debug.LogError("Imposter Baker: ImposterBaker shader not found.");
             }
-            
-            _imposterBakerMaterial = new Material(_imposterBakerShader);
-            if(_imposterBakerMaterial == null)
+
+            data.imposterBakerMaterial = new Material(data.imposterBakerShader);
+            if(data.imposterBakerMaterial == null)
             {
                 Debug.LogError("imposterBaker Material is not valid");
                 return false;
             }
 
             // find stuff to bake
-            List<MeshRenderer> renderers = new List<MeshRenderer>(transform.GetComponentsInChildren<MeshRenderer>(true));
-            renderers.Remove(gameObject.GetComponent<MeshRenderer>());
+            List<MeshRenderer> renderersList = new List<MeshRenderer>(transform.GetComponentsInChildren<MeshRenderer>(true));
+            renderersList.Remove(gameObject.GetComponent<MeshRenderer>());
 
-            if (renderers == null || renderers.Count == 0)
+            if (renderersList == null || renderersList.Count == 0)
             {
                 Debug.LogError("Imposter Baker: No MeshRenderers found to bake imposter from.");
                 return false;
             }
 
-            _renderers = renderers.ToArray();
-            _meshes = new Mesh[_renderers.Length];
-            _materials = new Material[_renderers.Length][];
+            var renderers = renderersList.ToArray();
+            var meshes = new Mesh[renderers.Length];
+            var materials = new Material[renderers.Length][];
     
-            for (int i = 0; i < _renderers.Length; i++)
+            for (int i = 0; i < renderers.Length; i++)
             {
-                _meshes[i] = _renderers[i].GetComponent<MeshFilter>().sharedMesh;
-                _materials[i] = new Material[_renderers[i].sharedMaterials.Length];
-                for (int j = 0; j < _renderers[i].sharedMaterials.Length; j++)
+                var meshFilter = renderers[i].GetComponent<MeshFilter>();
+                if (meshFilter == null || meshFilter.sharedMesh == null)
+                    continue;
+
+                meshes[i] = meshFilter.sharedMesh;
+                materials[i] = new Material[renderers[i].sharedMaterials.Length];
+                for (int j = 0; j < renderers[i].sharedMaterials.Length; j++)
                 {
-                    _materials[i][j] = new Material(_renderers[i].sharedMaterials[j]);
+                    materials[i][j] = new Material(renderers[i].sharedMaterials[j]);
                 }
             }
-    
+
+            data.renderers = renderers;
+            data.meshes = meshes;
+            data.materials = materials;
+
             // make sure frames are even
-            if (_frames % 2 != 0)
-                _frames -= 1;
-    
+            if (settings.frames % 2 != 0)
+                settings.frames -= 1;
+
             // make sure min is 2 x 2
-            _frames = Mathf.Max(2, _frames);
-    
-            _bounds = new Bounds(_renderers[0].transform.position, Vector3.zero);
-            for (int i = 0; i < _renderers.Length; i++)
+            settings.frames = Mathf.Max(2, settings.frames);
+
+            var bounds = data.renderers[0].bounds;
+            for (int i = 0; i < data.renderers.Length; i++)
             {
-                Vector3[] verts = _meshes[i].vertices;
-                for (int v = 0; v < verts.Length; v++)
-                {
-                    Vector3 meshWorldVert = _renderers[i].localToWorldMatrix.MultiplyPoint3x4(verts[v]);
-                    Vector3 meshLocalToRoot = transform.worldToLocalMatrix.MultiplyPoint3x4(meshWorldVert);
-                    Vector3 worldVert = transform.localToWorldMatrix.MultiplyPoint3x4(meshLocalToRoot);
-                    _bounds.Encapsulate(worldVert);
-                }
+                Vector3[] verts = data.meshes[i].vertices;
+                Matrix4x4 localToWorldMatrix = data.renderers[i].localToWorldMatrix;
+                bounds.Encapsulate(GeometryUtility.CalculateBounds(verts, localToWorldMatrix));
             }
-    
-            _boundsRadius = Vector3.Distance(_bounds.min, _bounds.max) * 0.5f;
-            _boundsOffset = _bounds.center;
-    
-            _snapshots = SnapshotBuilder.Build(_frames, _boundsRadius, _boundsOffset, Quaternion.Euler(_samplingRotation), _useHalfSphere);
+
+            data.boundsRadius = Vector3.Distance(bounds.min, bounds.max) * 0.5f;
+            data.boundsOffset = bounds.center;
+
+            data.snapshots = SnapshotBuilder.Build(
+                settings.frames, 
+                data.boundsRadius, 
+                data.boundsOffset, 
+                Quaternion.Euler(settings.samplingRotation), 
+                settings.useHalfSphere);
     
             return true;
         }
@@ -177,7 +173,8 @@ namespace ImposterBaker.Editor
         {
             string assetPath = EditorUtility.SaveFilePanelInProject("Save Imposter Textures", 
                 gameObject.name, "", "Select textures save location");
-            _directoryPath = Path.GetDirectoryName(assetPath);
+
+            settings.directoryPath = Path.GetDirectoryName(assetPath);
     
             // fix rotation bug ?
             Vector3 oldPosition = transform.position;
@@ -187,30 +184,19 @@ namespace ImposterBaker.Editor
             transform.position = Vector3.zero;
             transform.rotation = Quaternion.identity;
             transform.localScale = Vector3.one;
-    
-            if (CheckData())
+
+            if (TryPrepareData(settings, out var data))
             {
                 RenderTexture albedoPackRT = null;
                 RenderTexture normalPackRT = null;
 
-                SetupCamera();
-
                 try
                 {
-                    albedoPackRT = RenderTexture.GetTemporary(_atlasResolution, _atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
-                    normalPackRT = RenderTexture.GetTemporary(_atlasResolution, _atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
-                    CaptureViews(albedoPackRT, normalPackRT);
+                    albedoPackRT = RenderTexture.GetTemporary(settings.atlasResolution, settings.atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+                    normalPackRT = RenderTexture.GetTemporary(settings.atlasResolution, settings.atlasResolution, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+                    CaptureViews(albedoPackRT, normalPackRT, settings, data);
 
-                    var settings = new ImposterBakeSettings
-                    {
-                        atlasResolution = _atlasResolution,
-                        boundsOffset = _boundsOffset,
-                        boundsRadius = _boundsRadius,
-                        frames = _frames,
-                        useHalfSphere = _useHalfSphere,
-                    };
-
-                    ImposterAssetFactory.Create(gameObject, _directoryPath, albedoPackRT, normalPackRT, settings);
+                    ImposterAssetFactory.Create(gameObject, settings, data, albedoPackRT, normalPackRT);
                 } catch (Exception e)
                 {
                     Debug.LogError($"Imposter Bake Failed");
@@ -223,9 +209,6 @@ namespace ImposterBaker.Editor
                         RenderTexture.ReleaseTemporary(albedoPackRT);
                     if (normalPackRT != null)
                         RenderTexture.ReleaseTemporary(normalPackRT);
-
-                    if(_camera != null)
-                        DestroyImmediate(_camera.gameObject);
                 }
             }
     
@@ -237,78 +220,33 @@ namespace ImposterBaker.Editor
         }
 
 
-        private void SetupCamera()
+        private static void DrawMeshesToTarget(ImposterBakeData data, ImposterBakerPass pass, CommandBuffer cmd)
         {
-            _camera = new GameObject("ImposterBakerCamera").AddComponent<Camera>();
-            _camera.cameraType = CameraType.Game;
-            _camera.enabled = false;
-            _camera.orthographic = true;
-            _camera.farClipPlane = 1000f;
-            _camera.nearClipPlane = 0;
-        }
-
-
-        void DrawMeshesToTarget(ImposterBakerPass pass)
-        {
-            for (int i = 0; i < _renderers.Length; i++)
+            for (int i = 0; i < data.renderers.Length; i++)
             {
-                for (int j = 0; j < _meshes[i].subMeshCount; j++)
+                for (int j = 0; j < data.meshes[i].subMeshCount; j++)
                 {
-                    _imposterBakerMaterial.SetPass((int)pass);
-                    Graphics.DrawMeshNow(_meshes[i], _renderers[i].localToWorldMatrix, j);
+                    data.imposterBakerMaterial.SetPass((int)pass);
+                    cmd.DrawMesh(data.meshes[i], data.renderers[i].localToWorldMatrix, data.imposterBakerMaterial, j);
                 }
             }
         }
 
 
-        void DrawMeshesToTarget(ImposterBakerPass pass, CommandBuffer cmd)
+        private static void DrawMeshesToTarget(ImposterBakeData data, UnityShaderPass pass, CommandBuffer cmd)
         {
-            for (int i = 0; i < _renderers.Length; i++)
+            for (int i = 0; i < data.renderers.Length; i++)
             {
-                for (int j = 0; j < _meshes[i].subMeshCount; j++)
-                {
-                    _imposterBakerMaterial.SetPass((int)pass);
-                    cmd.DrawMesh(_meshes[i], _renderers[i].localToWorldMatrix, _imposterBakerMaterial, j);
-                }
-            }
-        }
-
-
-        void DrawMeshesToTarget(UnityShaderPass pass)
-        {
-            for (int i = 0; i < _renderers.Length; i++)
-            {
-                var renderer = _renderers[i];
-                var mesh = _meshes[i];
-                var materials = _materials[i];
-    
-                for (int j = 0; j < mesh.subMeshCount; j++)
-                {
-                    var material = materials[j];
-                    int passIndex = material.FindPass(Enum.GetName(typeof(UnityShaderPass), pass));
-                    if (passIndex == -1)
-                        continue;
-                    material.SetPass(passIndex);
-                    Graphics.DrawMeshNow(mesh, renderer.localToWorldMatrix, j);
-                }
-            }
-        }
-
-
-        void DrawMeshesToTarget(UnityShaderPass pass, CommandBuffer cmd)
-        {
-            for (int i = 0; i < _renderers.Length; i++)
-            {
-                Mesh mesh = _meshes[i];
-                Renderer renderer = _renderers[i];
-                Material[] mats = _materials[i];
+                Mesh mesh = data.meshes[i];
+                Renderer renderer = data.renderers[i];
+                Material[] mats = data.materials[i];
 
                 for (int s = 0; s < mesh.subMeshCount; s++)
                 {
                     Material mat = mats[s];
                     int passIndex = mat.FindPass(Enum.GetName(typeof(UnityShaderPass), pass));
 
-                    if (pass < 0)
+                    if (passIndex < 0)
                         continue;
 
                     mat.SetPass(passIndex);
@@ -318,47 +256,41 @@ namespace ImposterBaker.Editor
         }
 
 
-        private void MinMaxBake(CommandBuffer cmd)
+        private static void MinMaxBake(ImposterBakeData imposterBakeData, 
+            RenderTexture texture, Snapshot snapshot, CommandBuffer cmd)
         {
             cmd.SetViewport(new Rect(
                 0, 0,
-                _minMaxBakeData.texture.width,
-                _minMaxBakeData.texture.height
+                texture.width,
+                texture.height
             ));
 
-            _minMaxBakeData.texture.Create();
+            cmd.SetRenderTarget(texture);
 
-            cmd.SetRenderTarget(_minMaxBakeData.texture);
-
-            float near = -_boundsRadius * 2.0f;
-            float far = _boundsRadius * 2.0f;
+            float near = -imposterBakeData.boundsRadius * 2.0f;
+            float far = imposterBakeData.boundsRadius * 2.0f;
             Matrix4x4 ortho = Matrix4x4.Ortho(
-                -_boundsRadius, _boundsRadius,
-                -_boundsRadius, _boundsRadius,
+                -imposterBakeData.boundsRadius, imposterBakeData.boundsRadius,
+                -imposterBakeData.boundsRadius, imposterBakeData.boundsRadius,
                 near,
                 far);
             cmd.SetProjectionMatrix(ortho);
 
             Matrix4x4 cameraMatrix = 
-                Matrix4x4.TRS(_minMaxBakeData.snapshot.position, 
-                Quaternion.LookRotation(_minMaxBakeData.snapshot.direction, Vector3.up), 
+                Matrix4x4.TRS(snapshot.position, 
+                Quaternion.LookRotation(snapshot.direction, Vector3.up), 
                 new Vector3(1, 1, -1)).inverse;
             cmd.SetViewMatrix(cameraMatrix);
 
-            DrawMeshesToTarget(ImposterBakerPass.MinMax, cmd);
+            DrawMeshesToTarget(imposterBakeData, ImposterBakerPass.MinMax, cmd);
         }
 
 
-        private void RenderActualTiles(CommandBuffer cmd)
+        private static void RenderActualTiles(ImposterBakeData data, Snapshot snapshot, 
+            RenderTexture[] gBuffer, CommandBuffer cmd)
         {
-            Snapshot snapshot = _renderActualTilesData.snapshot;
-            RenderTexture[] gBuffer = _renderActualTilesData.gBuffer;
-
             int w = gBuffer[0].width;
             int h = gBuffer[0].height;
-
-            for (int i = 0; i < gBuffer.Length; i++)
-                gBuffer[i].Create();
 
             cmd.SetViewport(new Rect(0, 0, w, h));
 
@@ -370,11 +302,11 @@ namespace ImposterBaker.Editor
             cmd.ClearRenderTarget(true, true, Color.clear);
 
             float near = 0;
-            float far = _boundsRadius * 2.0f;
+            float far = data.boundsRadius * 2.0f;
 
             Matrix4x4 ortho = Matrix4x4.Ortho(
-                -_boundsRadius, _boundsRadius,
-                -_boundsRadius, _boundsRadius,
+                -data.boundsRadius, data.boundsRadius,
+                -data.boundsRadius, data.boundsRadius,
                 near, far
             );
 
@@ -386,90 +318,92 @@ namespace ImposterBaker.Editor
             cmd.SetViewMatrix(viewMatrix);
             cmd.SetProjectionMatrix(ortho);
 
-            DrawMeshesToTarget(UnityShaderPass.GBuffer, cmd);
+            DrawMeshesToTarget(data, UnityShaderPass.GBuffer, cmd);
 
             cmd.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.identity);
         }
 
 
-        void CaptureViews(RenderTexture albedoPackRT, RenderTexture normalPackRT)
+        private static void CaptureViews(RenderTexture albedoPackRT, RenderTexture normalPackRT, 
+            ImposterBakeSettings settings, ImposterBakeData imposterBakeData)
         {
-            int frameResolution = _atlasResolution / _frames;
-            FindBetterFrameBoundsSize();
-            RenderFrames(frameResolution, albedoPackRT, normalPackRT);
+            FindBetterFrameBoundsSize(settings, imposterBakeData);
+            RenderFrames(settings, imposterBakeData, albedoPackRT, normalPackRT);
         }
-    
+
 
         // find better min max frame/boundsRadius size
-        private void FindBetterFrameBoundsSize()
+        private static void FindBetterFrameBoundsSize(ImposterBakeSettings settings, ImposterBakeData data)
         {
-            RenderTexture minMaxTileRT = RenderTexture.GetTemporary(_atlasResolution, _atlasResolution, 0, 
+            RenderTexture minMaxTileRT = RenderTexture.GetTemporary(
+                MIN_MAX_TEXTURE_RES, MIN_MAX_TEXTURE_RES, 0,
                 RenderTextureFormat.R8, RenderTextureReadWrite.Linear);
+            Graphics.SetRenderTarget(minMaxTileRT);
+            GL.Clear(minMaxTileRT, true, Color.clear);
 
-            for (var i = 0; i < _snapshots.Length; i++)
-            {
-                _minMaxBakeData = new MinMaxBakeData
-                {
-                    snapshot = _snapshots[i],
-                    texture = minMaxTileRT,
-                    resolution = _atlasResolution,
-                };
-
-                var cmd = new CommandBuffer();
-                MinMaxBake(cmd);
-                Graphics.ExecuteCommandBuffer(cmd);
-            }
+            // Render all snapshots to Texture
+            RenderFramesByMinMaxPass(data, minMaxTileRT);
 
             //now read render texture
             Texture2D tempMinMaxTex = minMaxTileRT.ToTexture2D();
-
             Color32[] tempTexC = tempMinMaxTex.GetPixels32();
 
-            // start with max min
-            Vector2 min = Vector2.one * _atlasResolution;
-            Vector2 max = Vector2.zero;
-
-            //loop pixels get min max
-            for (int c = 0; c < tempTexC.Length; c++)
-            {
-                if (tempTexC[c].r != 0x00)
-                {
-                    Vector2 texPos = GridIndexUtils.ToXY(c, _atlasResolution);
-                    min.x = Mathf.Min(min.x, texPos.x);
-                    min.y = Mathf.Min(min.y, texPos.y);
-                    max.x = Mathf.Max(max.x, texPos.x);
-                    max.y = Mathf.Max(max.y, texPos.y);
-                }
-            }
-
-            // padding
-            min -= Vector2.one * _framePadding;
-            max += Vector2.one * _framePadding;
-
-            //rescale radius
-            Vector2 len = new Vector2(max.x - min.x, max.y - min.y);
-
-            float maxR = Mathf.Max(len.x, len.y);
-
-            float ratio = maxR / _atlasResolution; //assume square
-
-            _boundsRadius = _boundsRadius * ratio;
+            var contentBounds = TextureAssetUtils.FindContentBounds(tempTexC, MIN_MAX_TEXTURE_RES);
+            TextureAssetUtils.SaveRenderTexture(minMaxTileRT, settings.directoryPath, "MinMaxTileRT");
+            var newRadius = ClampRadius(contentBounds, data.boundsRadius, MIN_MAX_TEXTURE_RES, settings.framePadding);
+            data.boundsRadius = newRadius;
 
             //recalculate snapshots
-            _snapshots = SnapshotBuilder.Build(_frames, _boundsRadius, _boundsOffset, 
-                Quaternion.Euler(_samplingRotation), _useHalfSphere);
-
+            data.snapshots = SnapshotBuilder.Build(settings.frames, data.boundsRadius, data.boundsOffset,
+                Quaternion.Euler(settings.samplingRotation), settings.useHalfSphere);
+            
             RenderTexture.ReleaseTemporary(minMaxTileRT);
         }
 
 
-        private void RenderFrames(int frameResolution, RenderTexture albedoPackRT, RenderTexture normalPackRT)
+        private static float ClampRadius(BoundsInt contentBounds, float radius, int resolution, int framePadding)
         {
+            // Apply padding
+            contentBounds.min -= Vector3Int.one * framePadding;
+            contentBounds.max += Vector3Int.one * framePadding;
+
+            var emptyMinBorder = (Vector2Int)contentBounds.min;
+            var emptyMaxBorder = (Vector2Int.one * resolution - (Vector2Int)contentBounds.max);
+
+            // CalculateRadius
+            var minBorder = Mathf.Min(emptyMinBorder.x, emptyMaxBorder.x, emptyMinBorder.y, emptyMaxBorder.y);
+            float normalizedContentSize = minBorder / (float)resolution;
+            radius -= radius * normalizedContentSize * 2;
+
+            return radius;
+        }
+
+
+        static private void RenderFramesByMinMaxPass(
+            ImposterBakeData data, RenderTexture texture)
+        {
+            var cmd = new CommandBuffer();
+            // Render all snapshots to Texture
+            for (var i = 0; i < data.snapshots.Length; i++)
+            {
+                MinMaxBake(data, texture, data.snapshots[i], cmd);
+                Graphics.ExecuteCommandBuffer(cmd);
+                cmd.Clear();
+            }
+            cmd.Release();
+        }
+
+
+        static private void RenderFrames(ImposterBakeSettings settings, ImposterBakeData data,
+            RenderTexture albedoPackRT, RenderTexture normalPackRT)
+        {
+            int frameResolution = settings.atlasResolution / settings.frames;
             Shader.EnableKeyword("_RENDER_PASS_ENABLED");
-            for (int frameIndex = 0; frameIndex < _snapshots.Length; frameIndex++)
+            var cmd = new CommandBuffer();
+            for (int frameIndex = 0; frameIndex < data.snapshots.Length; frameIndex++)
             {
                 // current snapshot
-                Snapshot currentSnapshot = _snapshots[frameIndex];
+                Snapshot currentSnapshot = data.snapshots[frameIndex];
 
                 // set buffers
                 RenderTexture[] gBuffer = new RenderTexture[5];
@@ -484,15 +418,9 @@ namespace ImposterBaker.Editor
                 gBuffer[4] = RenderTexture.GetTemporary(frameResolution, frameResolution, 32, 
                     RenderTextureFormat.R16, RenderTextureReadWrite.Linear);
 
-                _renderActualTilesData = new RenderActualTilesData
-                {
-                    snapshot = currentSnapshot,
-                    gBuffer = gBuffer,
-                };
-
-                var cmd = new CommandBuffer();
-                RenderActualTiles(cmd);
+                RenderActualTiles(data, currentSnapshot, gBuffer, cmd);
                 Graphics.ExecuteCommandBuffer(cmd);
+                cmd.Clear();
 
                 // get frame rts
                 RenderTexture depthFrameRT = RenderTexture.GetTemporary(frameResolution, frameResolution, 32, 
@@ -514,14 +442,14 @@ namespace ImposterBaker.Editor
                 Graphics.SetRenderTarget(dilateFrameRT);
                 GL.Clear(true, true, Color.clear);
 
-                PrepareDilateMask(gBuffer[3], dilateFrameRT);
-                PrepareDepth(gBuffer[4], depthFrameRT);
+                PrepareDilateMask(data, gBuffer[3], dilateFrameRT);
+                PrepareDepth(data, gBuffer[4], depthFrameRT);
 
-                MergeAlbedoAlpha(gBuffer[0], gBuffer[3], albedoFrameRT);
+                MergeAlbedoAlpha(data, gBuffer[0], gBuffer[3], albedoFrameRT);
 
-                MergeNormalsDepthWithDilatePasses(frameResolution, gBuffer[2], depthFrameRT, dilateFrameRT, normalFrameRT);
+                MergeNormalsDepthWithDilatePasses(data, frameResolution, gBuffer[2], depthFrameRT, dilateFrameRT, normalFrameRT);
 
-                BlitToPackRts(frameIndex, albedoFrameRT, normalFrameRT, albedoPackRT, normalPackRT);
+                BlitToPackRts(settings.frames, frameIndex, albedoFrameRT, normalFrameRT, albedoPackRT, normalPackRT);
 
                 // dispose
                 RenderTexture.ReleaseTemporary(depthFrameRT);
@@ -533,42 +461,43 @@ namespace ImposterBaker.Editor
                 for (int i = 0; i < gBuffer.Length; i++)
                     RenderTexture.ReleaseTemporary(gBuffer[i]);
             }
+            cmd.Release();
 
             Shader.DisableKeyword("_RENDER_PASS_ENABLED");
         }
 
 
-        private void PrepareDilateMask(RenderTexture dilateRT, RenderTexture dilateFrameRT)
+        static private void PrepareDilateMask(ImposterBakeData data, RenderTexture dilateRT, RenderTexture dilateFrameRT)
         {
-            _imposterBakerMaterial.SetTexture("_AlphaMap", dilateRT);
-            _imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 0, 0, 0));
-            _imposterBakerMaterial.SetPass((int)ImposterBakerPass.AlphaCopy);
-            Graphics.Blit(dilateRT, dilateFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.AlphaCopy);
+            data.imposterBakerMaterial.SetTexture("_AlphaMap", dilateRT);
+            data.imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 0, 0, 0));
+            data.imposterBakerMaterial.SetPass((int)ImposterBakerPass.AlphaCopy);
+            Graphics.Blit(dilateRT, dilateFrameRT, data.imposterBakerMaterial, (int)ImposterBakerPass.AlphaCopy);
         }
-    
-    
-        private void PrepareDepth(RenderTexture depthRT, RenderTexture depthFrameRT)
+
+
+        static private void PrepareDepth(ImposterBakeData data, RenderTexture depthRT, RenderTexture depthFrameRT)
         {
-            _imposterBakerMaterial.SetTexture("_DepthMap", depthRT);
-            _imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 0, 0, 0));
-            _imposterBakerMaterial.SetPass((int)ImposterBakerPass.DepthCopy);
-            Graphics.Blit(depthRT, depthFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.DepthCopy);
+            data.imposterBakerMaterial.SetTexture("_DepthMap", depthRT);
+            data.imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 0, 0, 0));
+            data.imposterBakerMaterial.SetPass((int)ImposterBakerPass.DepthCopy);
+            Graphics.Blit(depthRT, depthFrameRT, data.imposterBakerMaterial, (int)ImposterBakerPass.DepthCopy);
         }
-    
-    
-        private void MergeAlbedoAlpha(RenderTexture albedoRT, RenderTexture alphaRT, RenderTexture albedoFrameRT)
+
+
+        static private void MergeAlbedoAlpha(ImposterBakeData data, RenderTexture albedoRT, RenderTexture alphaRT, RenderTexture albedoFrameRT)
         {
             // dilate albedo
-            _imposterBakerMaterial.SetTexture("_BlitTexture", albedoRT);
-            _imposterBakerMaterial.SetTexture("_AlphaMap", alphaRT);
-            _imposterBakerMaterial.SetPass((int)ImposterBakerPass.MergeColorWithAlpha);
-            Graphics.Blit(albedoRT, albedoFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.MergeColorWithAlpha);
-            _imposterBakerMaterial.SetTexture("_BlitTexture", null);
-            _imposterBakerMaterial.SetTexture("_AlphaMap", null);
+            data.imposterBakerMaterial.SetTexture("_BlitTexture", albedoRT);
+            data.imposterBakerMaterial.SetTexture("_AlphaMap", alphaRT);
+            data.imposterBakerMaterial.SetPass((int)ImposterBakerPass.MergeColorWithAlpha);
+            Graphics.Blit(albedoRT, albedoFrameRT, data.imposterBakerMaterial, (int)ImposterBakerPass.MergeColorWithAlpha);
+            data.imposterBakerMaterial.SetTexture("_BlitTexture", null);
+            data.imposterBakerMaterial.SetTexture("_AlphaMap", null);
         }
-    
-    
-        private void MergeNormalsDepthWithDilatePasses(int frameResolution, RenderTexture normalsRT, 
+
+
+        static private void MergeNormalsDepthWithDilatePasses(ImposterBakeData data, int frameResolution, RenderTexture normalsRT, 
             RenderTexture depthRT, RenderTexture dilateMaskRT, RenderTexture normalFrameRT)
         {
            // merge normals + depth
@@ -588,11 +517,11 @@ namespace ImposterBaker.Editor
            Graphics.SetRenderTarget(tempDilateFrameRT);
            GL.Clear(true, true, Color.clear);
     
-           _imposterBakerMaterial.SetTexture("_NormalMap", normalsRT);
-           _imposterBakerMaterial.SetTexture("_DepthMap", depthRT);
-           _imposterBakerMaterial.SetPass((int)ImposterBakerPass.MergeNormalsDepth);
+           data.imposterBakerMaterial.SetTexture("_NormalMap", normalsRT);
+           data.imposterBakerMaterial.SetTexture("_DepthMap", depthRT);
+           data.imposterBakerMaterial.SetPass((int)ImposterBakerPass.MergeNormalsDepth);
     
-           Graphics.Blit(normalsRT, firstTempNormalsDepthRT, _imposterBakerMaterial, (int)ImposterBakerPass.MergeNormalsDepth);
+           Graphics.Blit(normalsRT, firstTempNormalsDepthRT, data.imposterBakerMaterial, (int)ImposterBakerPass.MergeNormalsDepth);
            Graphics.Blit(dilateMaskRT, tempDilateFrameRT);
     
            var steps = Mathf.CeilToInt(frameResolution / 10f);
@@ -600,40 +529,40 @@ namespace ImposterBaker.Editor
            for (int i = 0; i < MathF.Ceiling(steps / 2f); i++)
            {
                // First step of partial dilate
-               _imposterBakerMaterial.SetTexture("_MainTex", firstTempNormalsDepthRT);
-               _imposterBakerMaterial.SetTexture("_DilateMask", tempDilateFrameRT);
-               _imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 1, 1, 1));
-               Graphics.Blit(firstTempNormalsDepthRT, secondTempNormalsDepthRT, _imposterBakerMaterial, (int)ImposterBakerPass.PartialDilate);
+               data.imposterBakerMaterial.SetTexture("_MainTex", firstTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetTexture("_DilateMask", tempDilateFrameRT);
+               data.imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 1, 1, 1));
+               Graphics.Blit(firstTempNormalsDepthRT, secondTempNormalsDepthRT, data.imposterBakerMaterial, (int)ImposterBakerPass.PartialDilate);
     
                //Generate difference mask by comparing the alpha channels of result and source
-               _imposterBakerMaterial.SetTexture("_FirstTex", firstTempNormalsDepthRT);
-               _imposterBakerMaterial.SetTexture("_SecondTex", secondTempNormalsDepthRT);
-               _imposterBakerMaterial.SetVector("_Channels", new Vector4(0, 0, 0, 1));
-               Graphics.Blit(firstTempNormalsDepthRT, tempDilateFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.ChannelDifferenceMask);
+               data.imposterBakerMaterial.SetTexture("_FirstTex", firstTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetTexture("_SecondTex", secondTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetVector("_Channels", new Vector4(0, 0, 0, 1));
+               Graphics.Blit(firstTempNormalsDepthRT, tempDilateFrameRT, data.imposterBakerMaterial, (int)ImposterBakerPass.ChannelDifferenceMask);
     
                // Clear first temp render target
                Graphics.SetRenderTarget(firstTempNormalsDepthRT);
                GL.Clear(true, true, Color.clear);
     
                // Second step of partial dilate
-               _imposterBakerMaterial.SetTexture("_MainTex", secondTempNormalsDepthRT);
-               _imposterBakerMaterial.SetTexture("_DilateMask", tempDilateFrameRT);
-               _imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 1, 1, 1));
-               Graphics.Blit(secondTempNormalsDepthRT, firstTempNormalsDepthRT, _imposterBakerMaterial, (int)ImposterBakerPass.PartialDilate);
+               data.imposterBakerMaterial.SetTexture("_MainTex", secondTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetTexture("_DilateMask", tempDilateFrameRT);
+               data.imposterBakerMaterial.SetVector("_Channels", new Vector4(1, 1, 1, 1));
+               Graphics.Blit(secondTempNormalsDepthRT, firstTempNormalsDepthRT, data.imposterBakerMaterial, (int)ImposterBakerPass.PartialDilate);
     
                //Generate difference mask by comparing the alpha channels of result and source
-               _imposterBakerMaterial.SetTexture("_FirstTex", firstTempNormalsDepthRT);
-               _imposterBakerMaterial.SetTexture("_SecondTex", secondTempNormalsDepthRT);
-               _imposterBakerMaterial.SetVector("_Channels", new Vector4(0, 0, 0, 1));
-               Graphics.Blit(firstTempNormalsDepthRT, tempDilateFrameRT, _imposterBakerMaterial, (int)ImposterBakerPass.ChannelDifferenceMask);
+               data.imposterBakerMaterial.SetTexture("_FirstTex", firstTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetTexture("_SecondTex", secondTempNormalsDepthRT);
+               data.imposterBakerMaterial.SetVector("_Channels", new Vector4(0, 0, 0, 1));
+               Graphics.Blit(firstTempNormalsDepthRT, tempDilateFrameRT, data.imposterBakerMaterial, (int)ImposterBakerPass.ChannelDifferenceMask);
     
                // Clear second temp render target
                Graphics.SetRenderTarget(secondTempNormalsDepthRT);
                GL.Clear(true, true, Color.clear);
     
                // Clear textures properties
-               _imposterBakerMaterial.SetTexture("_FirstTex", null);
-               _imposterBakerMaterial.SetTexture("_SecondTex", null);
+               data.imposterBakerMaterial.SetTexture("_FirstTex", null);
+               data.imposterBakerMaterial.SetTexture("_SecondTex", null);
            }
     
            Graphics.Blit(firstTempNormalsDepthRT, normalFrameRT);
@@ -642,16 +571,16 @@ namespace ImposterBaker.Editor
            RenderTexture.ReleaseTemporary(secondTempNormalsDepthRT);
            RenderTexture.ReleaseTemporary(tempDilateFrameRT);
         }
-    
-    
-        private void BlitToPackRts(int frameIndex, RenderTexture albedoFrameRT, 
+
+
+        static private void BlitToPackRts(int framesCount, int frameIndex, RenderTexture albedoFrameRT, 
             RenderTexture normalFrameRT, RenderTexture albedoPackRT, RenderTexture normalPackRT)
         {
             //convert 1D index to flattened octahedra coordinate
             int x;
             int y;
             //this is 0-(frames-1) ex, 0-(12-1) 0-11 (for 12 x 12 frames)
-            GridIndexUtils.ToXY(frameIndex, _frames, out x, out y);
+            GridIndexUtils.ToXY(frameIndex, framesCount, out x, out y);
     
             //X Y position to write frame into atlas
             //this would be frame index * frame width, ex 2048/12 = 170.6 = 170
