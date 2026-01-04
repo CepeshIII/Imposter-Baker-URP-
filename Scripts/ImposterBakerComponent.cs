@@ -349,7 +349,6 @@ namespace ImposterBaker.Editor
             Color32[] tempTexC = tempMinMaxTex.GetPixels32();
 
             var contentBounds = TextureAssetUtils.FindContentBounds(tempTexC, MIN_MAX_TEXTURE_RES);
-            TextureAssetUtils.SaveRenderTexture(minMaxTileRT, settings.directoryPath, "MinMaxTileRT");
             var newRadius = ClampRadius(contentBounds, data.boundsRadius, MIN_MAX_TEXTURE_RES, settings.framePadding);
             data.boundsRadius = newRadius;
 
